@@ -98,7 +98,7 @@ namespace Wubuntu
             Menu.Items.AddRange(new ToolStripItem[] { StatusItem, IdentityItem, separator, RestartItem, ExitItem });
             Menu.AutoSize = true;
             StatusItem.Click += delegate { OpenLog(); };
-            RestartItem.Click += async delegate { await controller.RestartAsync(); };
+            RestartItem.Click += async delegate { await RestartAsync(); };
             ExitItem.Click += async delegate { await controller.ExitAsync(); };
             Menu.Opening += delegate { Theme(); RefreshState(); };
             Menu.Opened += delegate
@@ -119,9 +119,21 @@ namespace Wubuntu
         internal async System.Threading.Tasks.Task StartAsync(Action<string> showError = null)
         {
             if (await controller.StartAsync()) return;
+            ShowErrorAndClose("startup", showError);
+        }
+
+        internal async System.Threading.Tasks.Task RestartAsync(Action<string> showError = null)
+        {
+            if (controller.Busy || controller.ExitReady) return;
+            if (await controller.RestartAsync()) return;
+            ShowErrorAndClose("restart", showError);
+        }
+
+        private void ShowErrorAndClose(string operation, Action<string> showError)
+        {
             timer.Stop();
             Menu.Enabled = false;
-            log.Write("INFO", "Showing startup error dialog");
+            log.Write("INFO", "Showing " + operation + " error dialog");
             if (showError != null) showError(controller.LastError);
             else MessageBox.Show(controller.LastError, "Wubuntu", MessageBoxButtons.OK, MessageBoxIcon.Error);
             ExitThread();

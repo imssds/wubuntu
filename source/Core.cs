@@ -100,6 +100,7 @@ namespace Wubuntu
         private readonly Func<long> milliseconds;
         private readonly Func<int, Task> delay;
         private long nextFullCheckAt;
+        private bool monitorHealth;
         internal RunState State { get; private set; }
         internal bool Busy { get; private set; }
         internal bool ExitReady { get; private set; }
@@ -126,6 +127,7 @@ namespace Wubuntu
 
         internal void ReportFailure(Exception ex)
         {
+            monitorHealth = false;
             LastError = ex.Message;
             log.Error(ex);
             SetState(RunState.Error);
@@ -143,6 +145,7 @@ namespace Wubuntu
             await gate.WaitAsync();
             try
             {
+                monitorHealth = false;
                 try
                 {
                     LastError = null;
@@ -162,6 +165,7 @@ namespace Wubuntu
                     await WaitForSshAsync();
                     if (!backend.KeeperAlive) throw new IOException("Ubuntu's keep-alive connection closed during startup.");
                     nextFullCheckAt = milliseconds() + 60000;
+                    monitorHealth = true;
                     SetState(RunState.Running);
                     return true;
                 }
@@ -195,27 +199,47 @@ namespace Wubuntu
 
         internal async Task CheckAsync()
         {
-            if (State != RunState.Running || !gate.Wait(0)) return;
+            if (!monitorHealth || Busy || !gate.Wait(0)) return;
             try
             {
-                if (!backend.KeeperAlive)
-                    throw new IOException("Ubuntu or the keep-alive connection stopped. Use Restart WSL to recover.");
+                RequireKeeper();
                 // The ten-second tick checks our existing process without launching anything.
-                // External WSL/SSH checks are limited to once per minute while Running.
+                // SSH failures keep the minute checks; an unconfirmed/stopped Ubuntu ends them.
                 if (milliseconds() < nextFullCheckAt) return;
                 nextFullCheckAt = milliseconds() + 60000;
+                monitorHealth = false;
                 if (!await backend.IsUbuntuRunningAsync())
                     throw new IOException("Ubuntu stopped. Use Restart WSL to recover.");
+                RequireKeeper();
+                monitorHealth = true;
                 RequireSsh(await backend.SshDiagnosticAsync(3000));
-                log.Write("INFO", "Health check passed. Ubuntu and SSH are available");
+                RequireKeeper();
+                if (State == RunState.Error)
+                {
+                    LastError = null;
+                    log.Write("INFO", "SSH recovered. Ubuntu and SSH are available");
+                    SetState(RunState.Running);
+                }
+                else log.Write("INFO", "Health check passed. Ubuntu and SSH are available");
             }
             catch (Exception ex)
             {
-                LastError = ex.Message;
-                log.Error(ex);
-                SetState(RunState.Error);
+                if (State != RunState.Error || LastError != ex.Message)
+                {
+                    LastError = ex.Message;
+                    log.Error(ex);
+                    if (State != RunState.Error) SetState(RunState.Error);
+                    else Publish();
+                }
             }
             finally { gate.Release(); }
+        }
+
+        private void RequireKeeper()
+        {
+            if (backend.KeeperAlive) return;
+            monitorHealth = false;
+            throw new IOException("Ubuntu or the keep-alive connection stopped. Use Restart WSL to recover.");
         }
 
         private async Task WaitForSshAsync()

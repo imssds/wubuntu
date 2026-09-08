@@ -40,7 +40,11 @@ Right-click the tray icon to see the selected distribution, status, and controls
 
 If WSL is unavailable, the default distribution is missing or is not Ubuntu, or SSH does not become ready, Wubuntu records the error, shows an English Windows error dialog, and closes after you dismiss it. If Wubuntu started the distribution from a stopped state, it stops that distribution before showing the dialog. A distribution that was already running is left running after a failed startup.
 
-If Ubuntu or SSH becomes unavailable after startup, the app shows **Error** in the tray and records the cause in the log, without a dialog or automatic recovery. After fixing your environment, use **Restart WSL** or reopen the app. A failed restart stays in the tray as Error.
+If SSH becomes unavailable after a successful startup or restart, the app shows **Error** in the tray and records the cause without opening a dialog. While Ubuntu and the keep-alive process remain running, it checks again once per minute. The first successful check returns the status to **Running** and records the recovery. Repeated failures with the same error message do not add duplicate log records. Wubuntu does not restart Ubuntu or the SSH service to recover.
+
+If Ubuntu or the keep-alive process stops, or Ubuntu's running state cannot be checked, monitoring stops and the app stays in **Error** until you use **Restart WSL**. It does not deliberately start a stopped distribution during health checks.
+
+A failed manual restart shows an English Windows error dialog, including when SSH does not become ready within 15 seconds after the keep-alive process is ready. The app closes after you dismiss the dialog. Closing after a failed restart releases the keep-alive without issuing an additional distribution stop command.
 
 Wubuntu creates `logs/session.log` beside the EXE. Each app session clears the previous log; the current log is capped at 1 MiB and retained on exit. Failure to write the log does not block the app or open an extra dialog. App messages are English; underlying system diagnostics retained in the log may use the operating system's language.
 
@@ -56,7 +60,7 @@ Each line starts with local Windows date and time to seconds, without millisecon
 2026-09-08 13:29:39 [STATE] Running
 ```
 
-`INFO` records actions and check results, `STATE` records app state changes, `ERROR` gives the failure reason, and `DETAIL` preserves technical diagnostics on separate timestamped lines. The log includes Restart and Exit requests, startup cleanup decisions, and successful full health checks once per minute while Running. Routine ten-second process checks and failed attempts during the initial SSH wait stay silent. If SSH never becomes ready, one final error includes the last attempt's diagnostic details when available.
+`INFO` records actions and check results, `STATE` records app state changes, `ERROR` gives the failure reason, and `DETAIL` preserves technical diagnostics on separate timestamped lines. The log includes Restart and Exit requests, startup cleanup decisions, SSH recovery, and successful full health checks once per minute while Running. Routine ten-second process checks and failed attempts during the startup or restart SSH wait stay silent. If SSH never becomes ready, one final error includes the last attempt's diagnostic details when available.
 
 ## Build
 

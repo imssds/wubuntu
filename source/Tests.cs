@@ -74,11 +74,13 @@ namespace Wubuntu
             StartupFailureStopsUbuntu(folder).GetAwaiter().GetResult();
             StartupChecks(folder).GetAwaiter().GetResult();
             ReadinessChecks(folder).GetAwaiter().GetResult();
+            StoppedUbuntuChecks(folder).GetAwaiter().GetResult();
             LogChecks(folder);
             LogFormatChecks(folder);
             LoggingChecks(folder).GetAwaiter().GetResult();
             UiChecks(folder);
             StartupDialogChecks(folder);
+            RestartDialogChecks(folder);
         }
 
         private static async Task StartupFailureStopsUbuntu(string folder)
@@ -288,16 +290,60 @@ namespace Wubuntu
                 backend.SshResult = "SSH server is not reachable.";
                 await controller.CheckAsync();
                 Check(controller.State == RunState.Error && controller.LastError.Contains("SSH"), "SSH loss during a full check changes Running to Error");
-                await controller.RestartAsync();
-                Check(controller.State == RunState.Error && !controller.Busy, "restart cannot report Running while SSH is unavailable");
+                sshCalls = backend.SshCalls;
+                string failureLog = File.ReadAllText(log.Path);
+                for (now = 130000; now < 180000; now += 10000) await controller.CheckAsync();
+                Check(backend.SshCalls == sshCalls, "SSH failure keeps the one minute probe interval");
+                backend.Probe = ms => { throw new IOException("SSH server is not reachable."); };
+                await controller.CheckAsync();
+                Check(backend.SshCalls == sshCalls + 1 && File.ReadAllText(log.Path) == failureLog,
+                    "failed SSH is retried without repeating the same log error");
+                backend.Probe = null;
                 backend.SshResult = "SSH-2.0-test";
-                await controller.RestartAsync();
-                Check(controller.State == RunState.Running, "restart recovers when SSH becomes ready");
+                now = 240000;
+                await controller.CheckAsync();
+                Check(controller.State == RunState.Running && controller.LastError == null &&
+                    backend.Calls.FindAll(x => x == "start").Count == 1 && !backend.Calls.Contains("shutdown"),
+                    "SSH recovery clears Error without restarting Ubuntu");
+                Check(File.ReadAllText(log.Path).Contains("SSH recovered"), "SSH recovery is recorded in the log");
                 backend.KeeperAlive = false;
                 now += 10000;
                 lists = backend.Calls.Count;
                 await controller.CheckAsync();
                 Check(controller.State == RunState.Error && backend.Calls.Count == lists, "keeper failure is detected without waiting for the minute query");
+            }
+        }
+
+        private static async Task StoppedUbuntuChecks(string folder)
+        {
+            foreach (string failure in new[] { "Ubuntu stopped", "keeper stopped", "keeper stopped during probe" })
+            using (SessionLog log = new SessionLog(Path.Combine(folder, "stopped-ubuntu.log")))
+            {
+                long now = 0;
+                FakeBackend backend = new FakeBackend();
+                Controller controller = new Controller(backend, log, () => now);
+                await controller.StartAsync();
+                backend.SshResult = "SSH server is not reachable.";
+                now = 60000;
+                await controller.CheckAsync();
+                int probes = backend.SshCalls;
+                now = failure == "keeper stopped" ? 70000 : 120000;
+                if (failure == "Ubuntu stopped") backend.Running = false;
+                else if (failure == "keeper stopped") backend.KeeperAlive = false;
+                else backend.Probe = ms => { backend.KeeperAlive = false; return Task.FromResult("SSH-2.0-test"); };
+                await controller.CheckAsync();
+                Check(controller.State == RunState.Error && controller.LastError.Contains("stopped") &&
+                    backend.SshCalls == probes + (failure == "keeper stopped during probe" ? 1 : 0),
+                    failure + " prevents SSH recovery");
+                int calls = backend.Calls.Count;
+                probes = backend.SshCalls;
+                backend.Running = backend.KeeperAlive = true;
+                backend.Probe = null;
+                backend.SshResult = "SSH-2.0-test";
+                now += 60000;
+                await controller.CheckAsync();
+                Check(controller.State == RunState.Error && backend.Calls.Count == calls && backend.SshCalls == probes,
+                    failure + " leaves monitoring stopped until manual Restart");
             }
         }
 
@@ -327,7 +373,7 @@ namespace Wubuntu
                     }
                     context.Menu.Hide();
                     backend.ShutdownHold = new TaskCompletionSource<bool>();
-                    Task<bool> pending = controller.RestartAsync();
+                    Task pending = context.RestartAsync();
                     Check(!context.RestartItem.Enabled && !context.ExitItem.Enabled, "actual menu disables both actions during restart");
                     backend.ShutdownHold.SetResult(true);
                     if (!pending.IsCompleted)
@@ -375,6 +421,42 @@ namespace Wubuntu
                     controller.CheckAsync().GetAwaiter().GetResult();
                     Check(dialogs == 0 && !closed && controller.State == RunState.Error,
                         "runtime failure stays in the tray without a startup dialog");
+                }
+            }
+        }
+
+        private static void RestartDialogChecks(string folder)
+        {
+            foreach (bool stopFails in new[] { false, true })
+            using (SessionLog log = new SessionLog(Path.Combine(folder, "restart-ui.log")))
+            {
+                long now = 0;
+                FakeBackend backend = new FakeBackend();
+                Controller controller = new Controller(backend, log, () => now, ms => { now += ms; return Task.FromResult(0); });
+                using (TrayContext context = new TrayContext(controller, log, false))
+                {
+                    context.StartAsync().GetAwaiter().GetResult();
+                    backend.SshResult = "SSH server is not reachable.";
+                    if (stopFails) backend.Failure = new IOException("Ubuntu could not be stopped.");
+                    int dialogs = 0;
+                    bool closed = false;
+                    context.ThreadExit += delegate { closed = true; };
+                    context.RestartAsync(message => {
+                        dialogs++;
+                        Check(!closed && !context.Menu.Enabled && message == (stopFails ?
+                            "Ubuntu could not be stopped." : "SSH server is not reachable."),
+                            "restart failure shows its error and waits for OK with the menu disabled");
+                        Check(stopFails || now == 15000, "restart waits up to 15 seconds for SSH");
+                        int probes = backend.SshCalls;
+                        backend.SshResult = "SSH-2.0-test";
+                        now += 60000;
+                        controller.CheckAsync().GetAwaiter().GetResult();
+                        Check(backend.SshCalls == probes && controller.State == RunState.Error,
+                            "failed restart cannot resume monitoring while awaiting OK");
+                    }).GetAwaiter().GetResult();
+                    Check(dialogs == 1 && closed && backend.Running &&
+                        backend.Calls.FindAll(x => x == "shutdown").Count == 1,
+                        "OK closes after one restart error without an extra Ubuntu stop");
                 }
             }
         }
