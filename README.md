@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="assets/wubuntu-logo.png" alt="Wubuntu logo" width="128">
-</p>
-
-<hr>
+<h1 align="center">
+  <img src="assets/wubuntu-logo-readme.png" alt="Wubuntu" width="128">
+</h1>
 
 **One less terminal to keep open.**
 
@@ -12,7 +10,11 @@ Wubuntu takes that little job off your hands.
 
 It starts Ubuntu in WSL, keeps it running in the background, and checks whether SSH responds. You get a small icon in the Windows tray and can get on with your work.
 
-**[Download Wubuntu](https://github.com/imssds/wubuntu/releases)**
+<p align="center">
+  <a href="https://github.com/imssds/wubuntu/releases">
+    <img src="assets/download-button-readme.png" alt="Download Wubuntu" width="300">
+  </a>
+</p>
 
 ## Why it exists
 
@@ -24,7 +26,8 @@ Wubuntu is deliberately small. Open it when you need Ubuntu. Check on it when so
 
 ## Get started
 
-You’ll need 64-bit Windows with .NET Framework 4.8, Ubuntu set as your default WSL distribution, and SSH configured to start with Ubuntu.
+You’ll need 64-bit Windows with .NET Framework 4.8.<br>
+Have Ubuntu set as your default WSL distribution, with SSH configured to start alongside it.
 
 1. Download the ZIP.
 2. Extract it to a folder you can write to.
@@ -35,12 +38,12 @@ Look for the icon beside the clock. It may be in the tray overflow.
 ## In the tray
 
 <p align="center">
-  <img src="assets/tray-promo.png" alt="Wubuntu tray menu showing SSH readiness, Restart WSL and Exit" width="720">
+  <img src="assets/tray-promo.webp" alt="Wubuntu tray menu showing SSH readiness, Restart WSL and Exit" width="720">
 </p>
 
 Right-click the icon to open the menu.
 
-- **Running** - Ubuntu is running and SSH responds inside it.
+- **Ready** - Ubuntu is running and SSH responds inside it.
 - **Restart WSL** - restarts Ubuntu.
 - **Exit** - stops Ubuntu and closes Wubuntu.
 
