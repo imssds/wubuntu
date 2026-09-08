@@ -126,6 +126,8 @@ namespace Wubuntu
             string pidFile = Path.Combine(folder, mode + ".pid");
             using (EventWaitHandle ready = new EventWaitHandle(false, EventResetMode.ManualReset, signal))
             using (EventWaitHandle release = new EventWaitHandle(false, EventResetMode.ManualReset, signal + "-release"))
+            using (EventWaitHandle probe = new EventWaitHandle(false, EventResetMode.ManualReset, signal + "-probe"))
+            using (EventWaitHandle closed = new EventWaitHandle(false, EventResetMode.ManualReset, signal + "-closed"))
             {
                 ProcessStartInfo info = new ProcessStartInfo(Path.Combine(folder, "ProcessTestHelper.exe"),
                     mode + " " + signal + " \"" + pidFile + "\"") {
@@ -143,6 +145,12 @@ namespace Wubuntu
                     try { await operation; } catch (TimeoutException) { timedOut = true; }
                     Check(timedOut && (mode == "pipes" || helper.HasExited),
                         mode == "pipes" ? "inherited open pipes cannot hold the operation forever" : mode + " times out and stops its process");
+                    if (mode == "pipes")
+                    {
+                        probe.Set();
+                        Check(await Task.Run(() => closed.WaitOne(2000)) && !helper.HasExited,
+                            "timeout closes the read pipe while its writer is still alive");
+                    }
                 }
                 finally
                 {
@@ -471,6 +479,26 @@ namespace Wubuntu
                 now += 60000;
                 await controller.CheckAsync();
                 Check(backend.SshCalls == calls, "reported failure keeps health monitoring disabled");
+            }
+            using (SessionLog log = new SessionLog(Path.Combine(folder, "queued-recovery.log")))
+            {
+                long now = 0;
+                FakeBackend backend = new FakeBackend();
+                Controller controller = new Controller(backend, log, () => now);
+                await controller.StartAsync();
+                now = 60000;
+                backend.SshHold = new TaskCompletionSource<SshProbeResult>();
+                Task check = controller.CheckAsync();
+                controller.ReportFailure(new Exception("queued failure"));
+                backend.ShutdownHold = new TaskCompletionSource<bool>();
+                bool staleRunning = false;
+                controller.Changed += () => { if (controller.State == RunState.Running) staleRunning = true; };
+                Task<bool> restart = controller.RestartAsync();
+                backend.SshHold.SetResult(new SshProbeResult(true));
+                await check;
+                Check(!staleRunning, "queued restart does not erase the active health check failure");
+                backend.ShutdownHold.SetResult(true);
+                Check(await restart, "queued restart can recover after the failed health check ends");
             }
         }
 

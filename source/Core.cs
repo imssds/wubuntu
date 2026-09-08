@@ -117,6 +117,7 @@ namespace Wubuntu
         private long nextFullCheckAt;
         private bool monitorHealth;
         private Exception reportedFailure;
+        private int failureVersion;
         internal RunState State { get; private set; }
         internal bool Busy { get; private set; }
         internal bool ExitReady { get; private set; }
@@ -144,6 +145,7 @@ namespace Wubuntu
         internal void ReportFailure(Exception ex)
         {
             reportedFailure = ex;
+            failureVersion++;
             monitorHealth = false;
             LastError = ex.Message;
             log.Error(ex);
@@ -162,12 +164,15 @@ namespace Wubuntu
         private async Task<bool> OperateAsync(RunState operation)
         {
             if (Busy || ExitReady) return false;
-            reportedFailure = null;
+            int requestedVersion = failureVersion;
             Busy = true;
             Publish();
             await gate.WaitAsync();
             try
             {
+                // Leave a running health check's failure intact until it releases the gate.
+                // A newer failure while this request waited must still interrupt the request.
+                if (failureVersion == requestedVersion) reportedFailure = null;
                 monitorHealth = false;
                 try
                 {

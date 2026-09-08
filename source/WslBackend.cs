@@ -12,7 +12,9 @@ namespace Wubuntu
         private readonly string executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wsl.exe");
         private readonly SessionLog log;
         private Process keeper;
+        private ProcessPipes keeperPipes;
         private Task<string> keeperErrors;
+        private Task<string> keeperReady;
         public string Distribution { get; private set; }
         public bool StartedByApp { get; private set; }
         public bool WasAlreadyRunning { get; private set; }
@@ -118,13 +120,14 @@ namespace Wubuntu
                 if (!keeper.Start()) throw new IOException("Could not start the Ubuntu keep-alive process.");
                 Task deadline = Task.Delay(30000);
                 StartedByApp = !WasAlreadyRunning;
-                keeperErrors = keeper.StandardError.ReadToEndAsync();
+                keeperPipes = new ProcessPipes(keeper);
+                keeperErrors = keeperPipes.Error.ReadToEndAsync();
                 ProcessRunner.Observe(keeperErrors);
-                Process startingKeeper = keeper;
-                Task<string> ready = Task.Run(() => KeeperHandshakeAsync(startingKeeper, script));
-                try { await ProcessRunner.WithinAsync(ready, deadline, "Ubuntu did not become ready within 30 seconds."); }
+                ProcessPipes startingPipes = keeperPipes;
+                keeperReady = Task.Run(() => KeeperHandshakeAsync(startingPipes, script));
+                try { await ProcessRunner.WithinAsync(keeperReady, deadline, "Ubuntu did not become ready within 30 seconds."); }
                 catch (TimeoutException ex) { startupFailure = ex.Message; throw; }
-                string marker = await ready;
+                string marker = await keeperReady;
                 if (marker == "WUBUNTU_UNSUPPORTED")
                 {
                     startupFailure = "The default WSL distribution is not Ubuntu.";
@@ -145,11 +148,11 @@ namespace Wubuntu
             }
         }
 
-        private static async Task<string> KeeperHandshakeAsync(Process process, string script)
+        private static async Task<string> KeeperHandshakeAsync(ProcessPipes pipes, string script)
         {
-            await process.StandardInput.WriteAsync(script).ConfigureAwait(false);
-            await process.StandardInput.FlushAsync().ConfigureAwait(false);
-            return await process.StandardOutput.ReadLineAsync().ConfigureAwait(false);
+            await pipes.Input.WriteAsync(script).ConfigureAwait(false);
+            await pipes.Input.FlushAsync().ConfigureAwait(false);
+            return await pipes.Output.ReadLineAsync().ConfigureAwait(false);
         }
 
         private bool ContainsDistribution(string output)
@@ -226,8 +229,15 @@ done
         private async Task ReleaseKeeperAsync(bool failedStartup = false)
         {
             Process previous = keeper;
+            ProcessPipes pipes = keeperPipes;
+            Task<string> errors = keeperErrors;
+            Task<string> ready = keeperReady;
             keeper = null;
+            keeperPipes = null;
+            keeperErrors = keeperReady = null;
             if (previous == null) return;
+            Task cleanupDeadline = Task.Delay(failedStartup ? 1000 : 3000);
+            Exception failure = null;
             try
             {
                 if (!previous.HasExited)
@@ -242,11 +252,16 @@ done
                             throw new IOException("The keep-alive process did not exit after cleanup.");
                     }
                 }
-                if (keeperErrors != null && keeperErrors.Status == TaskStatus.RanToCompletion && !String.IsNullOrWhiteSpace(keeperErrors.Result))
-                    log.Write("DETAIL", keeperErrors.Result);
             }
             catch (InvalidOperationException) { }
-            finally { previous.Dispose(); keeperErrors = null; }
+            catch (Exception ex) { failure = ex; }
+            Task pending = Task.WhenAll(errors ?? Task.FromResult(""), ready ?? Task.FromResult(""));
+            try { if (pipes != null) await pipes.CloseAsync(pending, cleanupDeadline); }
+            catch (Exception ex) { failure = failure == null ? ex : new AggregateException(failure, ex); }
+            previous.Dispose();
+            if (errors != null && errors.Status == TaskStatus.RanToCompletion && !String.IsNullOrWhiteSpace(errors.Result))
+                log.Write("DETAIL", errors.Result);
+            if (failure != null) throw failure;
         }
 
         public void Dispose()
@@ -254,9 +269,14 @@ done
             // Release our pipe only; do not terminate an already running distribution.
             if (keeper != null)
             {
-                try { keeper.StandardInput.Close(); } catch (Exception) { }
-                keeper.Dispose();
-                keeper = null;
+                try
+                {
+                    if (keeperPipes != null)
+                        keeperPipes.CloseAsync(Task.WhenAll(keeperErrors ?? Task.FromResult(""),
+                            keeperReady ?? Task.FromResult("")), Task.Delay(1000)).GetAwaiter().GetResult();
+                }
+                catch (Exception ex) { log.Error(ex, "Could not close keep-alive streams"); }
+                finally { keeper.Dispose(); keeper = null; keeperPipes = null; keeperErrors = keeperReady = null; }
             }
         }
     }
