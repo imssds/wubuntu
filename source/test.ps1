@@ -20,4 +20,4 @@ if ($LiveCheck) { $testArguments += '--live-check' }
 if ($SavePreview) { $testArguments += '--save-preview' }
 & (Join-Path $ScratchDirectory 'Wubuntu.Tests.exe') @testArguments 2>&1 |
     Tee-Object -FilePath (Join-Path $ScratchDirectory $(if ($LiveCheck) { 'live-check-tests.log' } else { "$Group-tests.log" }))
-if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE." }
