@@ -11,7 +11,6 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Wubuntu")]
 [assembly: AssemblyDescription("A small tray companion for WSL Ubuntu")]
-[assembly: AssemblyVersion("1.0.1.0")]
 
 namespace Wubuntu
 {

@@ -1,0 +1,16 @@
+Wubuntu - One less terminal to keep open.
+
+Requires 64-bit Windows with .NET Framework 4.8, Ubuntu as your default
+WSL distribution, and SSH configured to start alongside Ubuntu.
+
+Extract all files to a folder you can write to. Run Wubuntu.exe.
+Look for the tray icon beside the clock, possibly in the tray overflow.
+Right-click it to check readiness, restart Ubuntu, or exit.
+
+Restart and Exit stop all processes and SSH connections in that Ubuntu
+distribution. Save your work first.
+
+To update: save your work, exit Wubuntu, replace the extracted application
+files with the new release, and run Wubuntu.exe again.
+
+Instructions and troubleshooting: https://github.com/imssds/wubuntu

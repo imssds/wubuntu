@@ -18,6 +18,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+      - name: Version tests
+        run: ./source/test-version.ps1
       - name: Build
         run: ./source/build.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests"
       - name: Core tests
