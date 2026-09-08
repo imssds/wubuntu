@@ -2,7 +2,7 @@
   <img src="assets/wubuntu-logo.png" alt="Wubuntu logo" width="128">
 </p>
 
-<h1 align="center">Wubuntu</h1>
+<hr>
 
 **One less terminal to keep open.**
 
