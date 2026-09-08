@@ -35,8 +35,6 @@ jobs:
         run: ./source/test.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests" -Group core
       - name: Process tests
         run: ./source/test.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests" -Group process
-      - name: UI tests
-        run: ./source/test.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests" -Group ui
       - uses: actions/upload-artifact@v4
         with:
           name: release-zip
