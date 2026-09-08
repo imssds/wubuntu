@@ -1,120 +1,47 @@
 # Wubuntu
 
-A small Windows tray app that keeps your default Ubuntu distribution running in WSL without an open terminal. It checks that SSH responds inside Ubuntu, so you can use your already configured SSH client, including Codex.
+**One less terminal to keep open.**
 
-Built with C# and Windows Forms on .NET Framework 4.8. Distributed as a ZIP, with no installer or Windows autostart.
+There’s a terminal window sitting somewhere on your desktop. You’re not using it. It’s just there to keep Ubuntu running.
 
-## Before you start
+Wubuntu takes that little job off your hands.
 
-You need:
+It starts Ubuntu in WSL, keeps it running in the background, and checks whether SSH responds. You get a small icon in the Windows tray and can get on with your work.
 
-- 64-bit Windows with .NET Framework 4.8 and working WSL.
-- A fully initialized Ubuntu distribution set as the WSL default. Its registered name can be anything; Wubuntu checks the Linux distribution itself. Other Linux distributions are not supported.
-- OpenSSH Server installed and configured to become available automatically when Ubuntu starts, through the SSH service or Ubuntu's `ssh.socket` activation.
-- The standard Ubuntu tools `ss` (iproute2), `ssh-keyscan` (openssh-client), and `timeout` (coreutils) for readiness checks.
-- Your SSH client, authentication, and network access already configured by you.
+**[Download Wubuntu](https://github.com/imssds/wubuntu/releases)**
 
-Wubuntu does not install WSL or Ubuntu, configure networking or authentication, or issue commands to start the SSH service. It uses the default Linux user for its keep-alive process. Readiness checks run as root inside the selected distribution to inspect listening sockets; they do not require Windows administrator privileges or a sudo password.
+## Why it exists
 
-There are no Wubuntu settings to fill in. The app selects the WSL default distribution once at startup and keeps using it for that session, even if the WSL default changes later. No Linux username, SSH host, or port is hardcoded.
+I wanted a simple way to keep Ubuntu running while working through SSH with tools like Codex. A place to check its status and restart it when needed.
 
-## Download and run
+That felt like a job for a tray icon.
 
-Download the ZIP from [GitHub Releases](https://github.com/imssds/wubuntu/releases), extract it to a writable folder, and run `Wubuntu.exe`. Keep the executable and its accompanying files together. You do not need to build the source.
+Wubuntu is deliberately small. Open it when you need Ubuntu. Check on it when something feels wrong. The rest of the time, it should be easy to forget it’s there.
 
-The app appears in the Windows tray, sometimes under the overflow arrow beside the clock. It launches Ubuntu without opening a terminal and waits up to 15 seconds for SSH after the keep-alive process is ready. The keep-alive handshake has a 30-second deadline including script input and the readiness response. Short-lived WSL commands also include input, output and process completion in their timeout; a failed command is cleaned up with up to one additional second to confirm process termination.
+## Get started
 
-## Using Wubuntu
+You’ll need 64-bit Windows with .NET Framework 4.8, Ubuntu set as your default WSL distribution, and SSH configured to start with Ubuntu.
 
-Right-click the tray icon to see the selected distribution, status, and controls:
+1. Download the ZIP.
+2. Extract it to a folder you can write to.
+3. Run `Wubuntu.exe`.
 
-- **Starting** means Ubuntu is starting or Wubuntu is waiting for SSH.
-- **Running** means Ubuntu is running and an SSH server inside that distribution answered a local readiness check. It does not verify your login, Windows or remote network access, or whether Codex is connected.
-- **Restart WSL** stops the selected distribution and starts it again.
-- **Exit** stops the selected distribution and closes the app.
-- Click the status row to open `logs/session.log`.
+Look for the icon beside the clock. It may be in the tray overflow.
 
-**Restart WSL and Exit terminate all processes and SSH connections inside the selected distribution**, even if it was already running before Wubuntu opened. Other distributions are left alone.
+## In the tray
 
-## Errors and logs
+<p align="center">
+  <img src="assets/tray-promo.png" alt="Wubuntu tray menu showing SSH readiness, Restart WSL and Exit" width="720">
+</p>
 
-If WSL is unavailable, the default distribution is missing or is not Ubuntu, or SSH does not become ready, Wubuntu records the error, shows an English Windows error dialog, and closes after you dismiss it. If Wubuntu started the distribution from a stopped state, it stops that distribution before showing the dialog. A distribution that was already running is left running after a failed startup.
+Right-click the icon to open the menu.
 
-If SSH becomes unavailable after a successful startup or restart, the app shows **Error** in the tray and records the cause without opening a dialog. While Ubuntu and the keep-alive process remain running, it checks again once per minute. The first successful check returns the status to **Running** and records the recovery. Repeated failures with the same error message do not add duplicate log records. Wubuntu does not restart Ubuntu or the SSH service to recover.
+- **Running** - Ubuntu is running and SSH responds inside it.
+- **Restart WSL** - restarts Ubuntu.
+- **Exit** - stops Ubuntu and closes Wubuntu.
 
-If Ubuntu or the keep-alive process stops, or Ubuntu's running state cannot be checked, monitoring stops and the app stays in **Error** until you use **Restart WSL**. It does not deliberately start a stopped distribution during health checks.
+**Restart and Exit stop all processes and SSH connections in that Ubuntu distribution. Save your work first.**
 
-An unexpected error reported by the Windows UI also stops monitoring. An operation already in progress stops its normal continuation after its pending step completes; a late successful SSH response cannot clear that error. Startup and restart failures retain the cleanup and dialog behavior described above.
+If something goes wrong, click the status to open the log and [open an issue](https://github.com/imssds/wubuntu/issues).
 
-A failed manual restart shows an English Windows error dialog, including when SSH does not become ready within 15 seconds after the keep-alive process is ready. The app closes after you dismiss the dialog. Closing after a failed restart releases the keep-alive without issuing an additional distribution stop command.
-
-Wubuntu creates `logs/session.log` beside the EXE. Each app session clears the previous log; the current log is capped at 1 MiB and retained on exit. Failure to write the log does not block the app or open an extra dialog. App messages are English; underlying system diagnostics retained in the log may use the operating system's language.
-
-Each line starts with local Windows date and time to seconds, without milliseconds or a timezone suffix:
-
-```text
-2026-09-08 13:29:30 [INFO] Selected distribution: Ubuntu
-2026-09-08 13:29:30 [INFO] Ubuntu is stopped
-2026-09-08 13:29:30 [INFO] Starting Ubuntu
-2026-09-08 13:29:38 [INFO] Ubuntu started
-2026-09-08 13:29:38 [INFO] Waiting for SSH for up to 15 seconds
-2026-09-08 13:29:39 [INFO] SSH is available at 127.0.0.1:2222
-2026-09-08 13:29:39 [STATE] Running
-```
-
-`INFO` records actions and check results, `STATE` records app state changes, `ERROR` gives the failure reason, and `DETAIL` preserves technical diagnostics on separate timestamped lines. The log includes Restart and Exit requests, startup cleanup decisions, SSH recovery, and successful full health checks once per minute while Running. Routine ten-second process checks and failed attempts during the startup or restart SSH wait stay silent. If SSH never becomes ready, one final error includes the last attempt's diagnostic details when available.
-
-## Build
-
-From the repository root, run in PowerShell:
-
-```powershell
-.\source\build.ps1
-.\dist\Wubuntu.exe
-```
-
-The build uses the .NET Framework C# compiler included with Windows; no external packages are needed. It writes `Wubuntu.exe`, `Wubuntu.exe.config`, `Wubuntu.ico`, and `LICENSE` to `dist/`. Close a running copy from that folder before rebuilding.
-
-## Tests
-
-Build with a temporary scratch folder, then pass that folder to the test script:
-
-```powershell
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ('Wubuntu-tests-' + [Guid]::NewGuid().ToString('N'))
-try {
-    .\source\build.ps1 -ScratchDirectory $scratch
-    .\source\test.ps1 -ScratchDirectory $scratch
-} finally {
-    if (Test-Path -LiteralPath $scratch) {
-        Remove-Item -LiteralPath $scratch -Recurse -Force
-    }
-}
-```
-
-Tests use a fake WSL backend and a controllable clock for startup deadlines. The optional `-LiveCheck` switch starts the real default distribution and checks SSH inside it. It releases the keep-alive afterward without terminating the distribution; it never exercises Restart or Exit against your Linux workloads.
-
-Use `-Group core`, `-Group process`, or `-Group ui` to run only the affected checks after building with the same scratch folder:
-
-```powershell
-.\source\test.ps1 -ScratchDirectory $scratch -Group core
-.\source\test.ps1 -ScratchDirectory $scratch -Group process
-.\source\test.ps1 -ScratchDirectory $scratch -Group ui -SavePreview
-```
-
-`core` checks the controller and logs. `process` uses a test-only helper executable to check input/output, exit diagnostics, blocked input, hung processes and inherited open output pipes, without WSL. `ui` opens a real WinForms menu and checks layout, actions and error dialogs; run it in an interactive Windows session. `-SavePreview` optionally saves `menu-preview.png` in the scratch folder. Without `-Group`, all three automatic groups run. `-LiveCheck` runs only the real integration check, regardless of the group; it is never part of `all`.
-
-The CI workflow builds on Windows and runs `core` and `process` for pull requests, pushes to `main`, and manual dispatches. UI and real WSL checks remain local. Test output is written to the scratch folder as `<group>-tests.log`; CI uploads the scratch logs on failure. `ProcessTestHelper.exe` is built only for tests and is not part of the release ZIP.
-
-## Release ZIP
-
-After building, package only the release files:
-
-```powershell
-Compress-Archive -LiteralPath .\dist\Wubuntu.exe, .\dist\Wubuntu.exe.config, .\dist\Wubuntu.ico, .\dist\LICENSE -DestinationPath .\dist\Wubuntu.zip -Force
-```
-
-Publish that ZIP in GitHub Releases. Do not include `logs/` or build/test scratch files. `source/` contains the code and scripts; `assets/` contains the original artwork. Build output in `dist/` is excluded from Git.
-
-## License
-
-[MIT](LICENSE).
+[MIT License](https://github.com/imssds/wubuntu/blob/main/LICENSE)
