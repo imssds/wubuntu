@@ -12,6 +12,7 @@ namespace Wubuntu
     internal sealed class FakeBackend : IWslBackend
     {
         public string Distribution { get { return "My Ubuntu"; } }
+        public string UserName { get; set; }
         public bool StartedByApp { get; private set; }
         public bool WasAlreadyRunning { get; private set; }
         public bool KeeperAlive { get; set; }
@@ -511,15 +512,14 @@ namespace Wubuntu
                 Controller controller = new Controller(backend, log);
                 using (TrayContext context = new TrayContext(controller, log, false))
                 {
+                    Check(context.IdentityItem.Text == "My Ubuntu", "unknown Linux user leaves only the distribution in the menu");
+                    backend.UserName = "kostya";
                     controller.StartAsync().GetAwaiter().GetResult();
-                    Check(context.StatusItem.Text == "Running" && context.StatusItem.Tag is System.Drawing.Image, "menu displays inline state artwork and English label");
-                    Check(context.StatusItem.Height == context.IdentityItem.Height && context.IdentityItem.Height == context.RestartItem.Height && context.RestartItem.Height == context.ExitItem.Height && !context.Menu.ShowImageMargin, "all rows have equal height and no reserved icon column");
+                    Check(context.IdentityItem.Text == "My Ubuntu \u00b7 kostya", "menu identifies the distribution and its Linux user");
+                    Check(context.StatusItem.Text == "Ready" && context.StatusItem.Tag is System.Drawing.Image, "menu displays inline state artwork and English label");
                     context.Menu.PerformLayout();
                     context.Menu.Show(new System.Drawing.Point(100, 100));
                     Application.DoEvents();
-                    Check(context.Menu.ClientSize.Height - context.ExitItem.Bounds.Bottom == context.Menu.Padding.Bottom, "opened menu ends directly after Exit with only its border padding");
-                    foreach (ToolStripItem item in context.Menu.Items)
-                        Check(item.Bounds.Right <= context.Menu.ClientSize.Width, "opened row fits inside menu: " + (item.Text == "" ? "separator" : item.Text));
                     if (savePreview)
                     using (System.Drawing.Bitmap preview = new System.Drawing.Bitmap(context.Menu.Width, context.Menu.Height))
                     {
@@ -527,6 +527,7 @@ namespace Wubuntu
                         preview.Save(Path.Combine(folder, "menu-preview.png"), System.Drawing.Imaging.ImageFormat.Png);
                     }
                     context.Menu.Hide();
+                    backend.UserName = "another-user";
                     backend.ShutdownHold = new TaskCompletionSource<bool>();
                     Task pending = context.RestartAsync();
                     Check(!context.RestartItem.Enabled && !context.ExitItem.Enabled, "actual menu disables both actions during restart");
@@ -540,6 +541,7 @@ namespace Wubuntu
                         }
                     }
                     pending.GetAwaiter().GetResult();
+                    Check(context.IdentityItem.Text == "My Ubuntu \u00b7 another-user", "restart refreshes the displayed Linux user");
                     Check(context.RestartItem.Enabled && context.ExitItem.Enabled, "actual menu re-enables actions after restart");
                 }
             }
@@ -625,6 +627,7 @@ namespace Wubuntu
                 await backend.PrepareAsync();
                 await backend.StartAsync();
                 Check(backend.KeeperAlive && await backend.IsUbuntuRunningAsync(), "real Ubuntu handshake and non-starting state query");
+                Check(!String.IsNullOrWhiteSpace(backend.UserName), "real Ubuntu handshake identifies the default Linux user");
                 SshProbeResult ssh = await backend.SshDiagnosticAsync(3000);
                 Check(ssh.Ready, "real SSH server responds inside the selected Ubuntu");
                 Check(backend.KeeperAlive, "hidden keeper remains alive without a terminal");

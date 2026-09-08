@@ -95,6 +95,7 @@ namespace Wubuntu
     internal interface IWslBackend : IDisposable
     {
         string Distribution { get; }
+        string UserName { get; }
         bool StartedByApp { get; }
         bool WasAlreadyRunning { get; }
         bool KeeperAlive { get; }
@@ -123,6 +124,7 @@ namespace Wubuntu
         internal bool ExitReady { get; private set; }
         internal string LastError { get; private set; }
         internal string Distribution { get { return backend.Distribution; } }
+        internal string UserName { get { return backend.UserName; } }
         internal event Action Changed;
 
         internal Controller(IWslBackend backend, SessionLog log, Func<long> milliseconds = null, Func<int, Task> delay = null)

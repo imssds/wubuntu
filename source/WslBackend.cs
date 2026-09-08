@@ -16,6 +16,7 @@ namespace Wubuntu
         private Task<string> keeperErrors;
         private Task<string> keeperReady;
         public string Distribution { get; private set; }
+        public string UserName { get; private set; }
         public bool StartedByApp { get; private set; }
         public bool WasAlreadyRunning { get; private set; }
         public bool KeeperAlive { get { return keeper != null && !keeper.HasExited; } }
@@ -104,6 +105,7 @@ namespace Wubuntu
 
         public async Task StartAsync()
         {
+            UserName = null;
             await ReleaseKeeperAsync();
             StartedByApp = false;
             WasAlreadyRunning = await IsUbuntuRunningAsync();
@@ -111,7 +113,7 @@ namespace Wubuntu
             log.Write("INFO", WasAlreadyRunning ? "Keeping Ubuntu running in the background" : "Starting Ubuntu");
             // Validate without sourcing os-release. The default Linux user owns the keeper.
             // read blocks on our stdin and exits when the app closes its pipe.
-            string script = "if grep -Eq \"^ID=(ubuntu|'ubuntu'|\\\"ubuntu\\\")$\" /etc/os-release; then printf 'WUBUNTU_READY\\n'; read -r line; else printf 'WUBUNTU_UNSUPPORTED\\n'; fi\n";
+            string script = "if grep -Eq \"^ID=(ubuntu|'ubuntu'|\\\"ubuntu\\\")$\" /etc/os-release; then printf 'WUBUNTU_READY\\t%s\\n' \"$(id -un)\"; read -r line; else printf 'WUBUNTU_UNSUPPORTED\\n'; fi\n";
             keeper = new Process { StartInfo = Info(Target + " --exec /bin/sh -s", Encoding.UTF8) };
             Exception startupError = null;
             string startupFailure = "Ubuntu could not be started.";
@@ -133,7 +135,11 @@ namespace Wubuntu
                     startupFailure = "The default WSL distribution is not Ubuntu.";
                     throw new IOException(startupFailure);
                 }
-                if (marker != "WUBUNTU_READY") throw new IOException("Unexpected startup response: " + (marker ?? "connection closed"));
+                const string readyPrefix = "WUBUNTU_READY\t";
+                if (marker == null || !marker.StartsWith(readyPrefix, StringComparison.Ordinal))
+                    throw new IOException("Unexpected startup response: " + (marker ?? "connection closed"));
+                string userName = marker.Substring(readyPrefix.Length).Trim();
+                UserName = String.IsNullOrWhiteSpace(userName) ? null : userName;
                 log.Write("INFO", WasAlreadyRunning ? "Ubuntu is ready" : "Ubuntu started");
             }
             catch (Exception ex)
