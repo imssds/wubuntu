@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: ./source/build.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests"
+      - name: Core tests
+        run: ./source/test.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests" -Group core
+      - name: Process tests
+        run: ./source/test.ps1 -ScratchDirectory "$env:RUNNER_TEMP/Wubuntu-tests" -Group process
+      - name: Failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics
+          path: ${{ runner.temp }}/Wubuntu-tests/*.log
+          if-no-files-found: ignore

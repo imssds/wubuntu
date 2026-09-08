@@ -22,7 +22,7 @@ There are no Wubuntu settings to fill in. The app selects the WSL default distri
 
 Download the ZIP from [GitHub Releases](https://github.com/imssds/wubuntu/releases), extract it to a writable folder, and run `Wubuntu.exe`. Keep the executable and its accompanying files together. You do not need to build the source.
 
-The app appears in the Windows tray, sometimes under the overflow arrow beside the clock. It launches Ubuntu without opening a terminal and waits up to 15 seconds for SSH after the keep-alive process is ready.
+The app appears in the Windows tray, sometimes under the overflow arrow beside the clock. It launches Ubuntu without opening a terminal and waits up to 15 seconds for SSH after the keep-alive process is ready. The keep-alive handshake has a 30-second deadline including script input and the readiness response. Short-lived WSL commands also include input, output and process completion in their timeout; a failed command is cleaned up with up to one additional second to confirm process termination.
 
 ## Using Wubuntu
 
@@ -43,6 +43,8 @@ If WSL is unavailable, the default distribution is missing or is not Ubuntu, or 
 If SSH becomes unavailable after a successful startup or restart, the app shows **Error** in the tray and records the cause without opening a dialog. While Ubuntu and the keep-alive process remain running, it checks again once per minute. The first successful check returns the status to **Running** and records the recovery. Repeated failures with the same error message do not add duplicate log records. Wubuntu does not restart Ubuntu or the SSH service to recover.
 
 If Ubuntu or the keep-alive process stops, or Ubuntu's running state cannot be checked, monitoring stops and the app stays in **Error** until you use **Restart WSL**. It does not deliberately start a stopped distribution during health checks.
+
+An unexpected error reported by the Windows UI also stops monitoring. An operation already in progress stops its normal continuation after its pending step completes; a late successful SSH response cannot clear that error. Startup and restart failures retain the cleanup and dialog behavior described above.
 
 A failed manual restart shows an English Windows error dialog, including when SSH does not become ready within 15 seconds after the keep-alive process is ready. The app closes after you dismiss the dialog. Closing after a failed restart releases the keep-alive without issuing an additional distribution stop command.
 
@@ -90,6 +92,18 @@ try {
 ```
 
 Tests use a fake WSL backend and a controllable clock for startup deadlines. The optional `-LiveCheck` switch starts the real default distribution and checks SSH inside it. It releases the keep-alive afterward without terminating the distribution; it never exercises Restart or Exit against your Linux workloads.
+
+Use `-Group core`, `-Group process`, or `-Group ui` to run only the affected checks after building with the same scratch folder:
+
+```powershell
+.\source\test.ps1 -ScratchDirectory $scratch -Group core
+.\source\test.ps1 -ScratchDirectory $scratch -Group process
+.\source\test.ps1 -ScratchDirectory $scratch -Group ui -SavePreview
+```
+
+`core` checks the controller and logs. `process` uses a test-only helper executable to check input/output, exit diagnostics, blocked input, hung processes and inherited open output pipes, without WSL. `ui` opens a real WinForms menu and checks layout, actions and error dialogs; run it in an interactive Windows session. `-SavePreview` optionally saves `menu-preview.png` in the scratch folder. Without `-Group`, all three automatic groups run. `-LiveCheck` runs only the real integration check, regardless of the group; it is never part of `all`.
+
+The CI workflow builds on Windows and runs `core` and `process` for pull requests, pushes to `main`, and manual dispatches. UI and real WSL checks remain local. Test output is written to the scratch folder as `<group>-tests.log`; CI uploads the scratch logs on failure. `ProcessTestHelper.exe` is built only for tests and is not part of the release ZIP.
 
 ## Release ZIP
 

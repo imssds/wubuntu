@@ -14,7 +14,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Asset builder compilation failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Asset conversion failed.' }
 $arguments = @('/nologo','/target:winexe','/platform:x64','/optimize+','/warn:4','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll',"/win32manifest:$(Join-Path $PSScriptRoot 'Wubuntu.manifest')","/win32icon:$(Join-Path $ScratchDirectory 'Wubuntu.ico')","/resource:$(Join-Path $ScratchDirectory 'Wubuntu.ico'),Wubuntu.ico","/out:$(Join-Path $outputDirectory 'Wubuntu.exe')")
 foreach ($name in @('starting','running','restarting','stopping','error')) { $arguments += "/resource:$(Join-Path $ScratchDirectory ($name + '.png')),$name.png" }
-foreach ($name in @('Core.cs','WslBackend.cs','TrayApp.cs')) { $arguments += Join-Path $PSScriptRoot $name }
+foreach ($name in @('Core.cs','ProcessRunner.cs','WslBackend.cs','TrayApp.cs')) { $arguments += Join-Path $PSScriptRoot $name }
 & $compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw 'Wubuntu compilation failed.' }
 Copy-Item -LiteralPath (Join-Path $ScratchDirectory 'Wubuntu.ico') -Destination (Join-Path $outputDirectory 'Wubuntu.ico') -Force

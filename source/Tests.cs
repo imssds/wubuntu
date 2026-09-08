@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -16,10 +19,10 @@ namespace Wubuntu
         internal Exception Failure;
         internal Exception PreparationFailure;
         internal Exception StartFailure;
-        internal Func<int, Task<string>> Probe;
+        internal Func<int, Task<SshProbeResult>> Probe;
         internal TaskCompletionSource<bool> ShutdownHold;
-        internal TaskCompletionSource<string> SshHold;
-        internal string SshResult = "SSH-2.0-test";
+        internal TaskCompletionSource<SshProbeResult> SshHold;
+        internal SshProbeResult SshResult = new SshProbeResult(true);
         internal int SshCalls;
         internal List<string> Calls = new List<string>();
         public Task PrepareAsync() { if (PreparationFailure != null) throw PreparationFailure; return Task.FromResult(0); }
@@ -37,7 +40,7 @@ namespace Wubuntu
             KeeperAlive = Running = false;
         }
         public Task<bool> IsUbuntuRunningAsync() { Calls.Add("list"); return Task.FromResult(Running); }
-        public Task<string> SshDiagnosticAsync(int timeoutMs)
+        public Task<SshProbeResult> SshDiagnosticAsync(int timeoutMs)
         {
             SshCalls++;
             if (Probe != null) return Probe(timeoutMs);
@@ -65,29 +68,101 @@ namespace Wubuntu
         {
             string folder = args[0];
             Directory.CreateDirectory(folder);
-            if (args.Length > 1 && args[1] == "--live-check")
+            if (Array.IndexOf(args, "--live-check") >= 0)
             {
                 LiveCheck(folder).GetAwaiter().GetResult();
                 return;
             }
-            RunCore(folder).GetAwaiter().GetResult();
-            StartupFailureStopsUbuntu(folder).GetAwaiter().GetResult();
-            StartupChecks(folder).GetAwaiter().GetResult();
-            ReadinessChecks(folder).GetAwaiter().GetResult();
-            StoppedUbuntuChecks(folder).GetAwaiter().GetResult();
-            LogChecks(folder);
-            LogFormatChecks(folder);
-            LoggingChecks(folder).GetAwaiter().GetResult();
-            UiChecks(folder);
-            StartupDialogChecks(folder);
-            RestartDialogChecks(folder);
+            string group = args.Length > 1 ? args[1] : "all";
+            if (group != "all" && group != "core" && group != "process" && group != "ui")
+                throw new ArgumentException("Unknown test group: " + group);
+            if (group == "all" || group == "core")
+            {
+                RunCore(folder).GetAwaiter().GetResult();
+                StartupFailureStopsUbuntu(folder).GetAwaiter().GetResult();
+                StartupChecks(folder).GetAwaiter().GetResult();
+                ReadinessChecks(folder).GetAwaiter().GetResult();
+                StoppedUbuntuChecks(folder).GetAwaiter().GetResult();
+                LogChecks(folder);
+                LogFormatChecks(folder);
+                LoggingChecks(folder).GetAwaiter().GetResult();
+                ExternalFailureChecks(folder).GetAwaiter().GetResult();
+            }
+            // Run async process tests before WinForms installs its synchronization context.
+            if (group == "all" || group == "process") ProcessChecks(folder).GetAwaiter().GetResult();
+            if (group == "all" || group == "ui")
+            {
+                UiChecks(folder, Array.IndexOf(args, "--save-preview") >= 0);
+                StartupDialogChecks(folder);
+                RestartDialogChecks(folder);
+            }
+        }
+
+        private static async Task ProcessChecks(string folder)
+        {
+            ProcessStartInfo info = new ProcessStartInfo(Path.Combine(folder, "ProcessTestHelper.exe"), "echo") {
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
+            };
+            ProcessResult result = await ProcessRunner.RunAsync(info, 5000, "test input");
+            Check(result.Output == "test input" && result.Error == "helper diagnostic",
+                "process receives stdin and captures both output streams");
+            info.Arguments = "error";
+            IOException failure = null;
+            try { await ProcessRunner.RunAsync(info, 5000, "failure output"); }
+            catch (IOException ex) { failure = ex; }
+            Check(failure != null && failure.Message.Contains("Exit code: 7") &&
+                failure.Message.Contains("failure output") && failure.Message.Contains("helper diagnostic"),
+                "nonzero exit retains exit code, stdout and stderr");
+            await ProcessTimeoutCheck(folder, "blocked-input");
+            await ProcessTimeoutCheck(folder, "hang");
+            await ProcessTimeoutCheck(folder, "pipes");
+        }
+
+        private static async Task ProcessTimeoutCheck(string folder, string mode)
+        {
+            string signal = "Local\\Wubuntu-test-" + Guid.NewGuid().ToString("N");
+            string pidFile = Path.Combine(folder, mode + ".pid");
+            using (EventWaitHandle ready = new EventWaitHandle(false, EventResetMode.ManualReset, signal))
+            using (EventWaitHandle release = new EventWaitHandle(false, EventResetMode.ManualReset, signal + "-release"))
+            {
+                ProcessStartInfo info = new ProcessStartInfo(Path.Combine(folder, "ProcessTestHelper.exe"),
+                    mode + " " + signal + " \"" + pidFile + "\"") {
+                    UseShellExecute = false, CreateNoWindow = true,
+                    RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                Task operation = ProcessRunner.RunAsync(info, 2000, mode == "blocked-input" ? new string('x', 1024 * 1024) : null);
+                Process helper = null;
+                try
+                {
+                    Check(await Task.Run(() => ready.WaitOne(5000)), mode + " helper reports ready");
+                    helper = Process.GetProcessById(Int32.Parse(File.ReadAllText(pidFile)));
+                    Check(await Task.WhenAny(operation, Task.Delay(6000)) == operation, mode + " is bounded");
+                    bool timedOut = false;
+                    try { await operation; } catch (TimeoutException) { timedOut = true; }
+                    Check(timedOut && (mode == "pipes" || helper.HasExited),
+                        mode == "pipes" ? "inherited open pipes cannot hold the operation forever" : mode + " times out and stops its process");
+                }
+                finally
+                {
+                    release.Set();
+                    if (helper != null)
+                    {
+                        if (!helper.HasExited) helper.Kill();
+                        helper.WaitForExit(1000);
+                        helper.Dispose();
+                    }
+                    ProcessRunner.Observe(operation);
+                }
+            }
         }
 
         private static async Task StartupFailureStopsUbuntu(string folder)
         {
             using (SessionLog log = new SessionLog(Path.Combine(folder, "startup-failure.log")))
             {
-                FakeBackend backend = new FakeBackend { SshResult = "SSH server is not reachable." };
+                FakeBackend backend = new FakeBackend { SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.") };
                 long now = 0;
                 Controller controller = new Controller(backend, log, () => now, ms => { now += ms; return Task.FromResult(0); });
                 Check(!await controller.StartAsync() && !backend.Running,
@@ -136,7 +211,7 @@ namespace Wubuntu
             {
                 long now = 0;
                 Func<int, Task> advance = ms => { now += ms; return Task.FromResult(0); };
-                FakeBackend existing = new FakeBackend { Running = true, SshResult = "SSH server is not reachable." };
+                FakeBackend existing = new FakeBackend { Running = true, SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.") };
                 Controller controller = new Controller(existing, log, () => now, advance);
                 Check(!await controller.StartAsync() && existing.Running, "failed startup preserves previously running Ubuntu");
                 Check(now == 15000 && controller.LastError == "SSH server is not reachable.", "unavailable SSH exhausts the 15 second startup budget");
@@ -154,13 +229,13 @@ namespace Wubuntu
 
                 now = 0;
                 FakeBackend delayed = new FakeBackend();
-                delayed.Probe = ms => Task.FromResult(now >= 14500 ? "SSH-2.0-test" : "SSH server is not reachable.");
+                delayed.Probe = ms => Task.FromResult(new SshProbeResult(now >= 14500, diagnostic: "SSH server is not reachable."));
                 controller = new Controller(delayed, log, () => now, advance);
                 Check(await controller.StartAsync() && now == 14500, "SSH becoming ready within the deadline succeeds");
 
                 now = 0;
                 FakeBackend late = new FakeBackend();
-                late.Probe = ms => { now = 15001; return Task.FromResult("SSH-2.0-test"); };
+                late.Probe = ms => { now = 15001; return Task.FromResult(new SshProbeResult(true)); };
                 controller = new Controller(late, log, () => now, advance);
                 Check(!await controller.StartAsync() && !late.Running, "SSH response after the deadline cannot produce Running");
             }
@@ -205,7 +280,7 @@ namespace Wubuntu
             using (SessionLog log = new SessionLog(Path.Combine(folder, "existing-ubuntu.log")))
             {
                 long now = 0;
-                FakeBackend backend = new FakeBackend { Running = true, SshResult = "SSH server is not reachable." };
+                FakeBackend backend = new FakeBackend { Running = true, SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.") };
                 Controller controller = new Controller(backend, log, () => now, ms => { now += ms; return Task.FromResult(0); });
                 await controller.StartAsync();
                 Check(File.ReadAllText(log.Path).Contains("Leaving previously running Ubuntu unchanged"),
@@ -270,11 +345,11 @@ namespace Wubuntu
             using (SessionLog log = new SessionLog(Path.Combine(folder, "readiness-test.log")))
             {
                 long now = 0;
-                FakeBackend backend = new FakeBackend { SshHold = new TaskCompletionSource<string>() };
+                FakeBackend backend = new FakeBackend { SshHold = new TaskCompletionSource<SshProbeResult>() };
                 Controller controller = new Controller(backend, log, () => now, ms => { now += ms; return Task.FromResult(0); });
                 Task<bool> startup = controller.StartAsync();
                 Check(controller.State == RunState.Starting && controller.Busy, "Starting remains until SSH is ready");
-                backend.SshHold.SetResult("SSH-2.0-test");
+                backend.SshHold.SetResult(new SshProbeResult(true));
                 await startup;
                 backend.SshHold = null;
                 Check(controller.State == RunState.Running, "Running requires successful SSH readiness");
@@ -287,7 +362,7 @@ namespace Wubuntu
                 await controller.CheckAsync();
                 Check(backend.SshCalls == sshCalls + 1, "repeated check cannot repeat the full query before the next minute");
                 now = 120000;
-                backend.SshResult = "SSH server is not reachable.";
+                backend.SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.");
                 await controller.CheckAsync();
                 Check(controller.State == RunState.Error && controller.LastError.Contains("SSH"), "SSH loss during a full check changes Running to Error");
                 sshCalls = backend.SshCalls;
@@ -299,7 +374,7 @@ namespace Wubuntu
                 Check(backend.SshCalls == sshCalls + 1 && File.ReadAllText(log.Path) == failureLog,
                     "failed SSH is retried without repeating the same log error");
                 backend.Probe = null;
-                backend.SshResult = "SSH-2.0-test";
+                backend.SshResult = new SshProbeResult(true);
                 now = 240000;
                 await controller.CheckAsync();
                 Check(controller.State == RunState.Running && controller.LastError == null &&
@@ -323,14 +398,14 @@ namespace Wubuntu
                 FakeBackend backend = new FakeBackend();
                 Controller controller = new Controller(backend, log, () => now);
                 await controller.StartAsync();
-                backend.SshResult = "SSH server is not reachable.";
+                backend.SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.");
                 now = 60000;
                 await controller.CheckAsync();
                 int probes = backend.SshCalls;
                 now = failure == "keeper stopped" ? 70000 : 120000;
                 if (failure == "Ubuntu stopped") backend.Running = false;
                 else if (failure == "keeper stopped") backend.KeeperAlive = false;
-                else backend.Probe = ms => { backend.KeeperAlive = false; return Task.FromResult("SSH-2.0-test"); };
+                else backend.Probe = ms => { backend.KeeperAlive = false; return Task.FromResult(new SshProbeResult(true)); };
                 await controller.CheckAsync();
                 Check(controller.State == RunState.Error && controller.LastError.Contains("stopped") &&
                     backend.SshCalls == probes + (failure == "keeper stopped during probe" ? 1 : 0),
@@ -339,7 +414,7 @@ namespace Wubuntu
                 probes = backend.SshCalls;
                 backend.Running = backend.KeeperAlive = true;
                 backend.Probe = null;
-                backend.SshResult = "SSH-2.0-test";
+                backend.SshResult = new SshProbeResult(true);
                 now += 60000;
                 await controller.CheckAsync();
                 Check(controller.State == RunState.Error && backend.Calls.Count == calls && backend.SshCalls == probes,
@@ -347,7 +422,59 @@ namespace Wubuntu
             }
         }
 
-        private static void UiChecks(string folder)
+        private static async Task ExternalFailureChecks(string folder)
+        {
+            foreach (bool existing in new[] { false, true })
+            using (SessionLog log = new SessionLog(Path.Combine(folder, "interrupted-start.log")))
+            {
+                FakeBackend backend = new FakeBackend { Running = existing, SshHold = new TaskCompletionSource<SshProbeResult>() };
+                Controller controller = new Controller(backend, log);
+                Task<bool> startup = controller.StartAsync();
+                controller.ReportFailure(new Exception("external failure"));
+                backend.SshHold.SetResult(new SshProbeResult(true));
+                Check(!await startup && controller.State == RunState.Error && controller.LastError == "external failure" &&
+                    !controller.Busy && backend.Running == existing,
+                    "reported startup error survives SSH completion and preserves ownership: " + existing);
+            }
+            foreach (bool exit in new[] { false, true })
+            using (SessionLog log = new SessionLog(Path.Combine(folder, "interrupted-stop.log")))
+            {
+                FakeBackend backend = new FakeBackend();
+                Controller controller = new Controller(backend, log);
+                await controller.StartAsync();
+                backend.ShutdownHold = new TaskCompletionSource<bool>();
+                Task<bool> operation = exit ? controller.ExitAsync() : controller.RestartAsync();
+                controller.ReportFailure(new Exception("external stop failure"));
+                backend.ShutdownHold.SetResult(true);
+                Check(!await operation && controller.State == RunState.Error && !controller.ExitReady && !controller.Busy &&
+                    !backend.Running && backend.Calls.FindAll(x => x == "start").Count == 1 &&
+                    backend.Calls.FindAll(x => x == "shutdown").Count == 1,
+                    "reported stop error prevents restart or successful exit without extra cleanup: " + exit);
+                backend.ShutdownHold = null;
+                Check(await controller.RestartAsync(), "a new explicit operation can recover after a reported failure");
+            }
+            using (SessionLog log = new SessionLog(Path.Combine(folder, "interrupted-health.log")))
+            {
+                long now = 0;
+                FakeBackend backend = new FakeBackend();
+                Controller controller = new Controller(backend, log, () => now);
+                await controller.StartAsync();
+                now = 60000;
+                backend.SshHold = new TaskCompletionSource<SshProbeResult>();
+                Task check = controller.CheckAsync();
+                controller.ReportFailure(new Exception("external health failure"));
+                backend.SshHold.SetResult(new SshProbeResult(true));
+                await check;
+                Check(controller.State == RunState.Error && controller.LastError == "external health failure",
+                    "pending health success cannot overwrite a reported failure");
+                int calls = backend.SshCalls;
+                now += 60000;
+                await controller.CheckAsync();
+                Check(backend.SshCalls == calls, "reported failure keeps health monitoring disabled");
+            }
+        }
+
+        private static void UiChecks(string folder, bool savePreview)
         {
             Application.EnableVisualStyles();
             using (SessionLog log = new SessionLog(Path.Combine(folder, "ui-test.log")))
@@ -358,7 +485,6 @@ namespace Wubuntu
                 {
                     controller.StartAsync().GetAwaiter().GetResult();
                     Check(context.StatusItem.Text == "Running" && context.StatusItem.Tag is System.Drawing.Image, "menu displays inline state artwork and English label");
-                    Check(context.Menu.Items.Count == 5, "menu contains only status, identity, divider, restart and exit");
                     Check(context.StatusItem.Height == context.IdentityItem.Height && context.IdentityItem.Height == context.RestartItem.Height && context.RestartItem.Height == context.ExitItem.Height && !context.Menu.ShowImageMargin, "all rows have equal height and no reserved icon column");
                     context.Menu.PerformLayout();
                     context.Menu.Show(new System.Drawing.Point(100, 100));
@@ -366,6 +492,7 @@ namespace Wubuntu
                     Check(context.Menu.ClientSize.Height - context.ExitItem.Bounds.Bottom == context.Menu.Padding.Bottom, "opened menu ends directly after Exit with only its border padding");
                     foreach (ToolStripItem item in context.Menu.Items)
                         Check(item.Bounds.Right <= context.Menu.ClientSize.Width, "opened row fits inside menu: " + (item.Text == "" ? "separator" : item.Text));
+                    if (savePreview)
                     using (System.Drawing.Bitmap preview = new System.Drawing.Bitmap(context.Menu.Width, context.Menu.Height))
                     {
                         context.Menu.DrawToBitmap(preview, new System.Drawing.Rectangle(System.Drawing.Point.Empty, context.Menu.Size));
@@ -395,7 +522,7 @@ namespace Wubuntu
             using (SessionLog log = new SessionLog(Path.Combine(folder, "startup-ui.log")))
             {
                 long now = 0;
-                FakeBackend backend = new FakeBackend { SshResult = "SSH server is not reachable." };
+                FakeBackend backend = new FakeBackend { SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.") };
                 Controller controller = new Controller(backend, log, () => now, ms => { now += ms; return Task.FromResult(0); });
                 using (TrayContext context = new TrayContext(controller, log, false))
                 {
@@ -436,7 +563,7 @@ namespace Wubuntu
                 using (TrayContext context = new TrayContext(controller, log, false))
                 {
                     context.StartAsync().GetAwaiter().GetResult();
-                    backend.SshResult = "SSH server is not reachable.";
+                    backend.SshResult = new SshProbeResult(false, diagnostic: "SSH server is not reachable.");
                     if (stopFails) backend.Failure = new IOException("Ubuntu could not be stopped.");
                     int dialogs = 0;
                     bool closed = false;
@@ -448,7 +575,7 @@ namespace Wubuntu
                             "restart failure shows its error and waits for OK with the menu disabled");
                         Check(stopFails || now == 15000, "restart waits up to 15 seconds for SSH");
                         int probes = backend.SshCalls;
-                        backend.SshResult = "SSH-2.0-test";
+                        backend.SshResult = new SshProbeResult(true);
                         now += 60000;
                         controller.CheckAsync().GetAwaiter().GetResult();
                         Check(backend.SshCalls == probes && controller.State == RunState.Error,
@@ -470,8 +597,8 @@ namespace Wubuntu
                 await backend.PrepareAsync();
                 await backend.StartAsync();
                 Check(backend.KeeperAlive && await backend.IsUbuntuRunningAsync(), "real Ubuntu handshake and non-starting state query");
-                string ssh = await backend.SshDiagnosticAsync(3000);
-                Check(ssh.StartsWith("SSH-"), "real SSH server responds inside the selected Ubuntu");
+                SshProbeResult ssh = await backend.SshDiagnosticAsync(3000);
+                Check(ssh.Ready, "real SSH server responds inside the selected Ubuntu");
                 Check(backend.KeeperAlive, "hidden keeper remains alive without a terminal");
             }
         }

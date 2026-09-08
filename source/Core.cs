@@ -78,6 +78,20 @@ namespace Wubuntu
         public void Dispose() { }
     }
 
+    internal sealed class SshProbeResult
+    {
+        internal readonly bool Ready;
+        internal readonly string Endpoint;
+        internal readonly string Diagnostic;
+
+        internal SshProbeResult(bool ready, string endpoint = null, string diagnostic = null)
+        {
+            Ready = ready;
+            Endpoint = endpoint;
+            Diagnostic = diagnostic;
+        }
+    }
+
     internal interface IWslBackend : IDisposable
     {
         string Distribution { get; }
@@ -88,10 +102,11 @@ namespace Wubuntu
         Task StartAsync();
         Task ShutdownAsync();
         Task<bool> IsUbuntuRunningAsync();
-        Task<string> SshDiagnosticAsync(int timeoutMs);
+        Task<SshProbeResult> SshDiagnosticAsync(int timeoutMs);
     }
 
-    // All changes are serialized. Health checks never start a stopped distribution.
+    // Call from the WinForms UI thread; awaits retain that context. The gate serializes
+    // async operations with health checks, not arbitrary callers on multiple threads.
     internal sealed class Controller
     {
         private readonly IWslBackend backend;
@@ -101,6 +116,7 @@ namespace Wubuntu
         private readonly Func<int, Task> delay;
         private long nextFullCheckAt;
         private bool monitorHealth;
+        private Exception reportedFailure;
         internal RunState State { get; private set; }
         internal bool Busy { get; private set; }
         internal bool ExitReady { get; private set; }
@@ -127,10 +143,16 @@ namespace Wubuntu
 
         internal void ReportFailure(Exception ex)
         {
+            reportedFailure = ex;
             monitorHealth = false;
             LastError = ex.Message;
             log.Error(ex);
             SetState(RunState.Error);
+        }
+
+        private void RequireNoReportedFailure()
+        {
+            if (reportedFailure != null) throw new OperationCanceledException("Operation interrupted by a reported failure.", reportedFailure);
         }
 
         internal Task<bool> StartAsync() { return OperateAsync(RunState.Starting); }
@@ -140,6 +162,7 @@ namespace Wubuntu
         private async Task<bool> OperateAsync(RunState operation)
         {
             if (Busy || ExitReady) return false;
+            reportedFailure = null;
             Busy = true;
             Publish();
             await gate.WaitAsync();
@@ -148,21 +171,29 @@ namespace Wubuntu
                 monitorHealth = false;
                 try
                 {
+                    RequireNoReportedFailure();
                     LastError = null;
                     if (operation == RunState.Restarting) log.Write("INFO", "Restart requested");
                     if (operation == RunState.Stopping) log.Write("INFO", "Exit requested");
                     SetState(operation);
+                    RequireNoReportedFailure();
                     if (operation == RunState.Starting) await backend.PrepareAsync();
+                    RequireNoReportedFailure();
                     if (operation != RunState.Starting) await backend.ShutdownAsync();
+                    RequireNoReportedFailure();
                     if (operation == RunState.Stopping)
                     {
                         ExitReady = true;
                         return true;
                     }
                     await backend.StartAsync();
-                    if (!backend.KeeperAlive || !await backend.IsUbuntuRunningAsync())
+                    RequireNoReportedFailure();
+                    bool running = backend.KeeperAlive && await backend.IsUbuntuRunningAsync();
+                    RequireNoReportedFailure();
+                    if (!running)
                         throw new IOException("Ubuntu did not remain running after startup.");
                     await WaitForSshAsync();
+                    RequireNoReportedFailure();
                     if (!backend.KeeperAlive) throw new IOException("Ubuntu's keep-alive connection closed during startup.");
                     nextFullCheckAt = milliseconds() + 60000;
                     monitorHealth = true;
@@ -171,8 +202,11 @@ namespace Wubuntu
                 }
                 catch (Exception ex)
                 {
-                    LastError = ex.Message;
-                    log.Error(ex);
+                    if (reportedFailure == null)
+                    {
+                        LastError = ex.Message;
+                        log.Error(ex);
+                    }
                 }
                 if (operation == RunState.Starting && backend.StartedByApp)
                 {
@@ -208,11 +242,15 @@ namespace Wubuntu
                 if (milliseconds() < nextFullCheckAt) return;
                 nextFullCheckAt = milliseconds() + 60000;
                 monitorHealth = false;
-                if (!await backend.IsUbuntuRunningAsync())
+                bool running = await backend.IsUbuntuRunningAsync();
+                RequireNoReportedFailure();
+                if (!running)
                     throw new IOException("Ubuntu stopped. Use Restart WSL to recover.");
                 RequireKeeper();
                 monitorHealth = true;
-                RequireSsh(await backend.SshDiagnosticAsync(3000));
+                SshProbeResult diagnostic = await backend.SshDiagnosticAsync(3000);
+                RequireNoReportedFailure();
+                RequireSsh(diagnostic);
                 RequireKeeper();
                 if (State == RunState.Error)
                 {
@@ -224,6 +262,7 @@ namespace Wubuntu
             }
             catch (Exception ex)
             {
+                if (reportedFailure != null) return;
                 if (State != RunState.Error || LastError != ex.Message)
                 {
                     LastError = ex.Message;
@@ -246,7 +285,7 @@ namespace Wubuntu
         {
             log.Write("INFO", "Waiting for SSH for up to 15 seconds");
             long deadline = milliseconds() + 15000;
-            string diagnostic = "SSH server is not reachable.";
+            SshProbeResult diagnostic = new SshProbeResult(false, diagnostic: "SSH server is not reachable.");
             Exception lastFailure = null;
             while (milliseconds() < deadline)
             {
@@ -258,26 +297,29 @@ namespace Wubuntu
                 }
                 catch (IOException ex)
                 {
-                    diagnostic = ex.Message;
+                    diagnostic = new SshProbeResult(false, diagnostic: ex.Message);
                     lastFailure = ex;
                 }
-                if (diagnostic != null && diagnostic.StartsWith("SSH-", StringComparison.Ordinal))
+                RequireNoReportedFailure();
+                if (diagnostic != null && diagnostic.Ready)
                 {
                     if (milliseconds() > deadline) throw new IOException("SSH server is not reachable.");
-                    log.Write("INFO", diagnostic.StartsWith("SSH-ready at ", StringComparison.Ordinal) ?
-                        "SSH is available at " + diagnostic.Substring("SSH-ready at ".Length) : "SSH is available");
+                    log.Write("INFO", String.IsNullOrEmpty(diagnostic.Endpoint) ? "SSH is available" :
+                        "SSH is available at " + diagnostic.Endpoint);
                     return;
                 }
                 int remaining = (int)(deadline - milliseconds());
                 if (remaining > 0) await delay(Math.Min(500, remaining));
+                RequireNoReportedFailure();
             }
             RequireSsh(diagnostic, lastFailure);
         }
 
-        private static void RequireSsh(string banner, Exception failure = null)
+        private static void RequireSsh(SshProbeResult result, Exception failure = null)
         {
-            if (String.IsNullOrEmpty(banner) || !banner.StartsWith("SSH-", StringComparison.Ordinal))
-                throw new IOException(String.IsNullOrWhiteSpace(banner) ? "SSH server is not reachable." : banner, failure);
+            if (result == null || !result.Ready)
+                throw new IOException(result == null || String.IsNullOrWhiteSpace(result.Diagnostic) ?
+                    "SSH server is not reachable." : result.Diagnostic, failure);
         }
     }
 }

@@ -35,32 +35,15 @@ namespace Wubuntu
         {
             try
             {
-                using (Process process = new Process { StartInfo = Info(arguments, script == null ? Encoding.Unicode : Encoding.UTF8) })
+                ProcessResult result = await ProcessRunner.RunAsync(
+                    Info(arguments, script == null ? Encoding.Unicode : Encoding.UTF8), timeoutMs,
+                    script == null ? null : script.Replace("\r", ""));
+                if (!String.IsNullOrWhiteSpace(result.Error))
                 {
-                    if (!process.Start()) throw new IOException("Could not start wsl.exe.");
-                    Task<string> output = process.StandardOutput.ReadToEndAsync();
-                    Task<string> error = process.StandardError.ReadToEndAsync();
-                    if (script != null) await process.StandardInput.WriteAsync(script.Replace("\r", ""));
-                    process.StandardInput.Close();
-                    if (!await Task.Run(() => process.WaitForExit(timeoutMs)))
-                    {
-                        try { process.Kill(); } catch (InvalidOperationException) { }
-                        throw new TimeoutException("WSL command timed out: " + arguments);
-                    }
-                    Task pipes = Task.WhenAll(output, error);
-                    if (await Task.WhenAny(pipes, Task.Delay(1000)) != pipes)
-                        throw new TimeoutException("WSL output pipes did not close.");
-                    string stdout = await output;
-                    string stderr = await error;
-                    if (process.ExitCode != 0)
-                        throw new IOException("WSL command: " + arguments + "\nExit code: " + process.ExitCode + "\n" + stdout + "\n" + stderr);
-                    if (!String.IsNullOrWhiteSpace(stderr))
-                    {
-                        if (captureDiagnostics != null) captureDiagnostics(stderr);
-                        else log.Write("DETAIL", stderr);
-                    }
-                    return stdout;
+                    if (captureDiagnostics != null) captureDiagnostics(result.Error);
+                    else log.Write("DETAIL", result.Error);
                 }
+                return result.Output;
             }
             catch (Exception ex)
             {
@@ -133,16 +116,14 @@ namespace Wubuntu
             try
             {
                 if (!keeper.Start()) throw new IOException("Could not start the Ubuntu keep-alive process.");
+                Task deadline = Task.Delay(30000);
                 StartedByApp = !WasAlreadyRunning;
                 keeperErrors = keeper.StandardError.ReadToEndAsync();
-                await keeper.StandardInput.WriteAsync(script);
-                await keeper.StandardInput.FlushAsync();
-                Task<string> ready = keeper.StandardOutput.ReadLineAsync();
-                if (await Task.WhenAny(ready, Task.Delay(30000)) != ready)
-                {
-                    startupFailure = "Ubuntu did not become ready within 30 seconds.";
-                    throw new IOException(startupFailure);
-                }
+                ProcessRunner.Observe(keeperErrors);
+                Process startingKeeper = keeper;
+                Task<string> ready = Task.Run(() => KeeperHandshakeAsync(startingKeeper, script));
+                try { await ProcessRunner.WithinAsync(ready, deadline, "Ubuntu did not become ready within 30 seconds."); }
+                catch (TimeoutException ex) { startupFailure = ex.Message; throw; }
                 string marker = await ready;
                 if (marker == "WUBUNTU_UNSUPPORTED")
                 {
@@ -158,9 +139,17 @@ namespace Wubuntu
             }
             if (startupError != null)
             {
-                await ReleaseKeeperAsync();
+                try { await ReleaseKeeperAsync(true); }
+                catch (Exception cleanup) { startupError = new AggregateException(startupError, cleanup); }
                 throw new IOException(startupFailure, startupError);
             }
+        }
+
+        private static async Task<string> KeeperHandshakeAsync(Process process, string script)
+        {
+            await process.StandardInput.WriteAsync(script).ConfigureAwait(false);
+            await process.StandardInput.FlushAsync().ConfigureAwait(false);
+            return await process.StandardOutput.ReadLineAsync().ConfigureAwait(false);
         }
 
         private bool ContainsDistribution(string output)
@@ -214,25 +203,27 @@ fi
 done
 ";
 
-        public async Task<string> SshDiagnosticAsync(int timeoutMs)
+        public async Task<SshProbeResult> SshDiagnosticAsync(int timeoutMs)
         {
-            if (!KeeperAlive) return "Ubuntu's keep-alive connection is not running.";
+            if (!KeeperAlive) return new SshProbeResult(false, diagnostic: "Ubuntu's keep-alive connection is not running.");
             // Bound Linux children too, even if the Windows WSL client gets killed.
             string seconds = (Math.Max(100, timeoutMs - 250) / 1000.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
             string details = null;
             string result = await CommandAsync(Target + " --user root --exec /usr/bin/timeout -k 0.1 " + seconds + " /bin/sh -s",
                 Math.Max(1, timeoutMs), "SSH server is not reachable.", SshProbe, text => details = text);
             string diagnostic = String.IsNullOrWhiteSpace(result) ? "SSH server is not reachable." : result.Trim();
+            const string prefix = "SSH-ready at ";
+            bool ready = diagnostic.StartsWith(prefix, StringComparison.Ordinal) && diagnostic.Length > prefix.Length;
             if (!String.IsNullOrWhiteSpace(details))
             {
-                if (!diagnostic.StartsWith("SSH-", StringComparison.Ordinal))
+                if (!ready)
                     throw new IOException(diagnostic, new IOException(details));
                 log.Write("DETAIL", details);
             }
-            return diagnostic;
+            return new SshProbeResult(ready, ready ? diagnostic.Substring(prefix.Length) : null, ready ? null : diagnostic);
         }
 
-        private async Task ReleaseKeeperAsync()
+        private async Task ReleaseKeeperAsync(bool failedStartup = false)
         {
             Process previous = keeper;
             keeper = null;
@@ -241,11 +232,14 @@ done
             {
                 if (!previous.HasExited)
                 {
-                    try { previous.StandardInput.Close(); } catch (IOException) { }
-                    if (!await Task.Run(() => previous.WaitForExit(2000)))
+                    // A failed handshake may still be writing: kill before closing its stdin.
+                    if (!failedStartup)
+                        try { previous.StandardInput.Close(); } catch (IOException) { }
+                    if (failedStartup || !await Task.Run(() => previous.WaitForExit(2000)))
                     {
                         previous.Kill();
-                        await Task.Run(() => previous.WaitForExit(1000));
+                        if (!await Task.Run(() => previous.WaitForExit(1000)))
+                            throw new IOException("The keep-alive process did not exit after cleanup.");
                     }
                 }
                 if (keeperErrors != null && keeperErrors.Status == TaskStatus.RanToCompletion && !String.IsNullOrWhiteSpace(keeperErrors.Result))
