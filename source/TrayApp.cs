@@ -88,7 +88,8 @@ namespace Wubuntu
             StatusItem.Click += delegate { OpenLog(); };
             RestartItem.Click += async delegate { await RestartAsync(); };
             ExitItem.Click += async delegate { await controller.ExitAsync(); };
-            Menu.Opening += delegate { Theme(); RefreshState(); Menu.MeasureRows(); };
+            Menu.Opening += delegate { Theme(); RefreshState(); };
+            Menu.Closed += delegate { Menu.MeasureRows(); };
             Theme();
             tray = new NotifyIcon { Icon = Assets.Logo(), Text = "Wubuntu", ContextMenuStrip = Menu, Visible = true };
             controller.Changed += RefreshState;
@@ -147,6 +148,7 @@ namespace Wubuntu
             StatusItem.ToolTipText = controller.LastError == null ? "Open session.log" : controller.LastError + "\nClick to open session.log";
             RestartItem.Enabled = !controller.Busy;
             ExitItem.Enabled = !controller.Busy;
+            if (!Menu.Visible) Menu.MeasureRows();
             // The tray artwork deliberately never changes with state.
             if (controller.ExitReady) ExitThread();
         }
@@ -210,7 +212,7 @@ namespace Wubuntu
 
         internal int Pixels(int value) { return (int)Math.Round(value * dpiScale); }
 
-        // Measure before Show positions the popup; never resize it in Opened.
+        // Prepare the size before Show positions the popup; defer resizing an open menu until it closes.
         internal void MeasureRows()
         {
             int width = Pixels(210);
